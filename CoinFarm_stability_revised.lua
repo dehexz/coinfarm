@@ -2,10 +2,11 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local plr = Players.LocalPlayer
  
-local OFFSET = 5          -- studs below the coin to travel at
+local OFFSET = 0          -- studs below the coin to travel at
 local FIRST_SPEED = 999   -- first coin of the round is a fast snap
 local MENU_KEY = 0x70     -- F1
 local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
+local MAX_MISSES = 3      -- failed pickups in a row before the character resets (the ONLY reset trigger)
 
 -- Position-based death detection (for Infection and any mode where "Alive" is unreliable).
 -- If our character ends up more than this many studs from where we last put it, we were
@@ -23,7 +24,6 @@ local first = true
 local missed = 0         -- consecutive coins we reached but couldn't collect
 local lastResetTry = 0
 local noCoinSince = nil
-local noCoinResetDone = false
 local status = "Starting"
 local lifeChar = nil     -- character we last farmed with
 local lastContainerSeen = nil -- coin container from the previous step (map change detector)
@@ -241,7 +241,19 @@ local function resetCharacter()
         end
     end
  
-    -- Roblox menu key reset removed: unsupported in Lua Virtual Machine.
+    -- 3) Roblox menu reset: Esc, R, Enter. Only when Roblox is the focused window,
+    --    otherwise these keys would be typed into whatever app you are looking at.
+    if isrbxactive() then
+        pcall(function()
+            keypress(0x1B) wait(0.1) keyrelease(0x1B) wait(0.3)
+            keypress(0x52) wait(0.1) keyrelease(0x52) wait(0.3)
+            keypress(0x0D) wait(0.1) keyrelease(0x0D)
+        end)
+        for _ = 1, 20 do
+            wait(0.1)
+            if not isAlive() then return true end
+        end
+    end
     return false
 end
  
@@ -379,7 +391,6 @@ local function step()
         lastContainerSeen = container
         missed = 0
         first, noCoinSince = true, nil
-        noCoinResetDone = false
         if container then
             freezeUntil = tick() + 2
             evt("new map, settling")
@@ -392,7 +403,12 @@ local function step()
         return wait(0.2)
     end
  
-    -- Missed coin pickups no longer trigger an automatic reset.
+    -- The only reset trigger: MAX_MISSES failed pickups in a row.
+    if missed >= MAX_MISSES then
+        status = "Too many misses"
+        doReset("Missed " .. missed .. " coins")
+        return wait(0.5)
+    end
  
     if not container then
         status = "No coin container"
@@ -411,12 +427,9 @@ local function step()
         noCoinSince = noCoinSince or tick()
         cachedContainer = nil -- may be stale (new round/new map), re-scan
         status = "No coins"
-
-        -- No keyboard reset here; Lua Virtual Machine did not handle Esc/R/Enter reliably.
         return wait(0.1)
     end
     noCoinSince = nil
-    noCoinResetDone = false
  
     status = "Farming"
     setNoclip()
