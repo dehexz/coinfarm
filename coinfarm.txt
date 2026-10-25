@@ -1,0 +1,96 @@
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local plr = Players.LocalPlayer
+ 
+local OFFSET = 5          -- studs below the coin to travel at
+local FIRST_SPEED = 999   -- first coin of the round is a fast snap
+local MENU_KEY = 0x70     -- F1
+local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
+local MAX_MISSES = 3      -- failed pickups in a row before the character resets (the ONLY reset trigger)
+
+-- Position-based death detection (for Infection and any mode where "Alive" is unreliable).
+-- If our character ends up more than this many studs from where we last put it, we were
+-- killed / infected / teleported by the game.
+local TELEPORT_DIST = 40
+local POS_FRESH = 0.3     -- only trust the comparison if we wrote a position this recently (seconds)
+
+local MOUSE_Y_OFFSET = 0             -- only applies to the fallback mouse method; leave at 0
+local MOUSE_MENU = true              -- false = menu is display-only, no mouse reading/clicking at all (F1-F5 still work)
+ 
+local first = true
+local missed = 0         -- consecutive coins we reached but couldn't collect
+local lastResetTry = 0
+local noCoinSince = nil
+local status = "Starting"
+local lifeChar = nil     -- character we last farmed with
+local lastContainerSeen = nil -- coin container from the previous step (map change detector)
+local lastEvent = "-"        -- shown in the menu: the last notable thing the script did
+local wasAlive = false
+local freezeUntil = 0        -- hold still while the game swaps maps / characters
+local heartbeat = tick()     -- updated by the farm loop; the watchdog restarts the loop if it stalls
+local teleportFlag = false   -- set when position tracking decides we were moved/killed
+local lastSetPos, lastSetTime = nil, 0 -- last position the script wrote to the character
+ 
+-- Settings (changed from the Drawing menu below)
+local cfg = {
+    enabled = true,
+    autoReset = true,
+    speed = 20,
+}
+ 
+local function getEnabled() return cfg.enabled end
+local function getAutoReset() return cfg.autoReset end
+local function getSpeed() return cfg.speed end
+ 
+------------------------------------------------------------
+-- Performance helpers
+------------------------------------------------------------
+local ZERO = Vector3.new(0, 0, 0)
+local function zeroVel(part) part.Velocity = ZERO end
+ 
+local lastProps = {}
+local function setp(obj, key, value)
+    local c = lastProps[obj]
+    if not c then
+        c = {}
+        lastProps[obj] = c
+    end
+    if c[key] ~= value then
+        c[key] = value
+        obj[key] = value
+    end
+end
+ 
+------------------------------------------------------------
+-- Farm logic
+------------------------------------------------------------
+-- pcall'd: reading a deleted instance (old map) can throw in an external VM
+local function getParent(o) return o.Parent end
+local function isValid(obj)
+    if obj == nil then return false end
+    local ok, parent = pcall(getParent, obj)
+    return ok and parent ~= nil
+end
+ 
+-- Uses the "Alive" attribute; falls back to Humanoid health if it isn't set.
+local function isAlive()
+    local attr = plr:GetAttribute("Alive")
+    if attr == false then return false end
+
+    -- Don't trust the attribute alone: in Infection it can stay true after you are
+    -- infected/killed, so Humanoid health is checked as well.
+    local char = plr.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    if hum then
+        local ok, hp = pcall(function() return hum.Health end)
+        if ok and type(hp) == "number" and hp <= 0 then return false end
+    end
+
+    if attr == true then return true end
+    return hum ~= nil
+end
+ 
+local function dist(a, b)
+    local dx, dy, dz = a.X - b.X, a.Y - b.Y, a.Z - b.Z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
