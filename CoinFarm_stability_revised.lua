@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local plr = Players.LocalPlayer
  
-local OFFSET = 0          -- studs below the coin to travel at
+local OFFSET = 5          -- studs below the coin to travel at
 local FIRST_SPEED = 999   -- first coin of the round is a fast snap
 local MENU_KEY = 0x70     -- F1
 local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
@@ -23,7 +23,7 @@ local first = true
 local missed = 0         -- consecutive coins we reached but couldn't collect
 local lastResetTry = 0
 local noCoinSince = nil
-local noCoinResetDone = false -- send Esc, R, Enter once after the coin container stays empty
+local noCoinResetDone = false
 local status = "Starting"
 local lifeChar = nil     -- character we last farmed with
 local lastContainerSeen = nil -- coin container from the previous step (map change detector)
@@ -245,41 +245,17 @@ local function resetCharacter()
     return false
 end
  
-local PLAYER_COIN_BUFFER = 25 -- studs: avoid coins too close to another player
-
-local function isCoinNearOtherPlayer(coinPos)
-    for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= plr then
-            local character = other.Character
-            local otherRoot = character and character:FindFirstChild("HumanoidRootPart")
-            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-            if otherRoot and (not humanoid or humanoid.Health > 0) then
-                if dist(coinPos, otherRoot.Position) < PLAYER_COIN_BUFFER then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
-
 local function getClosestCoin(container, origin)
     local best, bestDist = nil, math.huge
-    local anyAvailableCoin = false
     for _, obj in ipairs(container:GetChildren()) do
         if obj.Name == "Coin_Server" and obj:FindFirstChild("TouchInterest") then
-            anyAvailableCoin = true
-            local coinPos = obj.Position
-            if not isCoinNearOtherPlayer(coinPos) then
-                local d = dist(coinPos, origin)
-                if d < bestDist then
-                    best, bestDist = obj, d
-                end
+            local d = dist(obj.Position, origin)
+            if d < bestDist then
+                best, bestDist = obj, d
             end
         end
     end
-    -- Second return value distinguishes an empty map from coins we are avoiding.
-    return best, (anyAvailableCoin and best == nil)
+    return best
 end
  
 -- Moves hrp toward coin. Returns true only if we arrived while the coin was still up for grabs.
@@ -430,13 +406,8 @@ local function step()
         return wait(0.25)
     end
  
-    local coin, coinsAvoidedNearPlayers = getClosestCoin(container, hrp.Position)
+    local coin = getClosestCoin(container, hrp.Position)
     if not coin then
-        if coinsAvoidedNearPlayers then
-            noCoinSince = nil
-            status = "Waiting: coins near players"
-            return wait(0.25)
-        end
         noCoinSince = noCoinSince or tick()
         cachedContainer = nil -- may be stale (new round/new map), re-scan
         status = "No coins"
