@@ -2,11 +2,10 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local plr = Players.LocalPlayer
  
-local OFFSET = 0          -- studs below the coin to travel at
+local OFFSET = 5          -- studs below the coin to travel at
 local FIRST_SPEED = 999   -- first coin of the round is a fast snap
 local MENU_KEY = 0x70     -- F1
 local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
-local MAX_MISSES = 3      -- failed pickups in a row before the character resets (the ONLY reset trigger)
 
 -- Position-based death detection (for Infection and any mode where "Alive" is unreliable).
 -- If our character ends up more than this many studs from where we last put it, we were
@@ -16,6 +15,9 @@ local POS_FRESH = 0.3     -- only trust the comparison if we wrote a position th
 
 local MOUSE_Y_OFFSET = 0             -- only applies to the fallback mouse method; leave at 0
 local MOUSE_MENU = true              -- false = menu is display-only, no mouse reading/clicking at all (F1-F5 still work)
+local FRIEND_STOP = true             -- default state of the friend-stop feature
+local CHECK_EXISTING_FRIENDS = false -- true = also stop if a friend is already in the server at load
+local FRIEND_NAMES = {}              -- fallback list if IsFriendsWith doesn't work, e.g. {"MyFriend1", "MyFriend2"}
  
 local first = true
 local missed = 0         -- consecutive coins we reached but couldn't collect
@@ -36,6 +38,7 @@ local cfg = {
     enabled = true,
     autoReset = true,
     speed = 20,
+    friendStop = FRIEND_STOP,
 }
  
 local function getEnabled() return cfg.enabled end
@@ -273,20 +276,13 @@ local function tween(hrp, coin, spd)
     local sx, sy, sz = sp.X, sp.Y - OFFSET, sp.Z
     local tx, ty, tz = tp.X, tp.Y - OFFSET, tp.Z
  
-    local safeSpeed = math.max(tonumber(spd) or 5, 1)
-    local duration = math.max(dist(sp, tp) / safeSpeed, 0.05)
+    local duration = math.max(dist(sp, tp) / spd, 0.05)
     local t0 = tick()
     local lastCheck = 0
-    -- Safety bound: leave this movement loop if it runs far longer than expected.
-    local hardDeadline = t0 + math.max(duration * 3, duration + 5, 10)
-
+ 
     while true do
         local now = tick()
         heartbeat = now
-        if now > hardDeadline then
-            evt("movement timeout")
-            return false
-        end
  
         if not isValid(hrp) or not isValid(coin) or not getEnabled() then
             return false
@@ -345,7 +341,10 @@ end
 local function step()
     if not getEnabled() then
         noCoinSince = nil
-        status = "Disabled"
+        -- keep the "friend joined" status visible instead of overwriting it
+        if status ~= "Stopped: friend joined" then
+            status = "Disabled"
+        end
         return wait(0.25)
     end
  
@@ -403,12 +402,7 @@ local function step()
         return wait(0.2)
     end
  
-    -- The only reset trigger: MAX_MISSES failed pickups in a row.
-    if missed >= MAX_MISSES then
-        status = "Too many misses"
-        doReset("Missed " .. missed .. " coins")
-        return wait(0.5)
-    end
+    -- Missed coin pickups no longer trigger an automatic reset.
  
     if not container then
         status = "No coin container"
@@ -559,6 +553,7 @@ rect(16, 34, MENU_W - 32, 2, C_ACCENT, 1, 2)
  
 addToggle("Farm", 46, "enabled")
 addToggle("Auto Reset", 82, "autoReset")
+addToggle("Friend Stop", 118, "friendStop")
  
 -- Speed row
 rect(10, 154, MENU_W - 20, 30, C_ROW, 8, 2)
@@ -745,17 +740,13 @@ local function startFarmLoop()
 end
 startFarmLoop()
  
--- Watchdog: restart the farm worker if its heartbeat goes stale.
--- A cooldown prevents repeated worker creation during a slow/stalled executor.
-local lastWatchdogRestart = 0
+-- Watchdog: if the farm loop hasn't ticked in 12s it is stuck or dead, so restart it.
 task.spawn(function()
     while true do
         wait(2)
-        local now = tick()
-        if now - heartbeat > 12 and now - lastWatchdogRestart > 15 then
-            lastWatchdogRestart = now
+        if tick() - heartbeat > 12 then
             evt("watchdog restart")
-            heartbeat = now
+            heartbeat = tick()
             cachedContainer = nil
             first = true
             noCoinSince = nil
@@ -765,4 +756,170 @@ task.spawn(function()
     end
 end)
 
+------------------------------------------------------------
+-- Friend watcher: stops the farm when a friend joins.
+-- It never re-enables the farm; that needs a manual toggle / F2.
+------------------------------------------------------------
+-- Automatic friend detection: Matcha has no IsFriendsWith, so we download your
+-- friends list from Roblox's web API with httpget and refresh it periodically.
+local friendIds = {}          -- [userId number] = true
+local friendsLoaded = false
+local lastFriendFetch = -999
+local warnedFriendApi = false
+
+local function fetchFriends()
+    local myId = nil
+    pcall(function() myId = plr.UserId end)
+    if not myId or myId <= 0 then return false, "no UserId" end
+
+    local ok, body = pcall(function()
+        return httpget("https://friends.roblox.com/v1/users/" .. tostring(myId) .. "/friends")
+    end)
+    if not ok or type(body) ~= "string" or body == "" then
+        return false, "request failed: " .. tostring(body)
+    end
+
+    local ids, count = {}, 0
+    for id in string.gmatch(body, '"id"%s*:%s*(%d+)') do
+        ids[tonumber(id)] = true
+        count = count + 1
+    end
+    if count == 0 and not string.find(body, '"data"', 1, true) then
+        return false, "unexpected response: " .. string.sub(body, 1, 60)
+    end
+
+    friendIds = ids
+    return true, count
+end
+
+local function refreshFriends()
+    -- retry every 10s until loaded once, then refresh every 60s
+    local interval = friendsLoaded and 60 or 10
+    if tick() - lastFriendFetch < interval then return end
+    lastFriendFetch = tick()
+
+    local ok, info = fetchFriends()
+    if ok then
+        if not friendsLoaded then
+            friendsLoaded = true
+            notify("Loaded " .. tostring(info) .. " friends. Friend Stop is active.", "Coin Farm", 4)
+        end
+    elseif not warnedFriendApi then
+        warnedFriendApi = true
+        warn("[CoinFarm] Friend list fetch failed: " .. tostring(info))
+        notify("Friend list fetch failed (see console). Using FRIEND_NAMES only.", "Coin Farm", 6)
+    end
+end
+
+local function isFriend(p)
+    local lname = string.lower(p.Name)
+    for _, n in ipairs(FRIEND_NAMES) do
+        if string.lower(n) == lname then return true end
+    end
+
+    local id = nil
+    pcall(function() id = p.UserId end)
+    return id ~= nil and friendIds[id] == true
+end
+
+-- On-screen banner (big, top-center, stays up for BANNER_TIME seconds)
+local BANNER_TIME = 10
+local BANNER_W, BANNER_H = 340, 70
+local bannerUntil = 0
+
+local function mkBanner(kind, props, z)
+    local d = Drawing.new(kind)
+    for k, v in pairs(props) do pcall(function() d[k] = v end) end
+    pcall(function() d.ZIndex = z end)
+    d.Visible = false
+    return d
+end
+
+local bnShadow = mkBanner("Square", { Filled = true, Color = C_SHADOW, Transparency = 0.35, Size = Vector2.new(BANNER_W, BANNER_H), Corner = 12 }, 30)
+local bnBg     = mkBanner("Square", { Filled = true, Color = C_BG, Transparency = 1, Size = Vector2.new(BANNER_W, BANNER_H), Corner = 12 }, 31)
+local bnBar    = mkBanner("Square", { Filled = true, Color = C_OFF, Transparency = 1, Size = Vector2.new(BANNER_W - 24, 3) }, 32)
+local bnTitle  = mkBanner("Text", { Text = "", Color = C_TEXT, Outline = false, Center = true }, 33)
+local bnSub    = mkBanner("Text", { Text = "", Color = C_DIM, Outline = false, Center = true }, 33)
+pcall(function() bnTitle.FontSize = 18 end)
+pcall(function() bnSub.FontSize = 14 end)
+
+local function getScreenW()
+    local w = 960
+    pcall(function()
+        local vs = workspace.CurrentCamera.ViewportSize
+        if vs and vs.X and vs.X > 0 then w = vs.X end
+    end)
+    return w
+end
+
+local function showBanner(title, sub)
+    bannerUntil = tick() + BANNER_TIME
+    pcall(function() bnTitle.Text = title end)
+    pcall(function() bnSub.Text = sub end)
+end
+
+task.spawn(function()
+    local shown = false
+    while true do
+        local on = tick() < bannerUntil
+        if on then
+            local x = math.floor(getScreenW() / 2 - BANNER_W / 2)
+            local y = 30
+            pcall(function()
+                bnShadow.Position = Vector2.new(x + 3, y + 4)
+                bnBg.Position = Vector2.new(x, y)
+                bnBar.Position = Vector2.new(x + 12, y + 8)
+                bnTitle.Position = Vector2.new(x + BANNER_W / 2, y + 18)
+                bnSub.Position = Vector2.new(x + BANNER_W / 2, y + 44)
+            end)
+        end
+        if on ~= shown then
+            shown = on
+            bnShadow.Visible, bnBg.Visible, bnBar.Visible = on, on, on
+            bnTitle.Visible, bnSub.Visible = on, on
+        end
+        wait(0.1)
+    end
+end)
+
+local function friendStopTrigger(name)
+    cfg.enabled = false
+    status = "Stopped: friend joined"
+    evt("friend: " .. tostring(name))
+    showBanner("FRIEND JOINED: " .. tostring(name), "Farm stopped. Re-enable manually (F2).")
+    notify(tostring(name) .. " joined. Farm stopped, re-enable manually.", "Coin Farm", 6)
+end
+
+task.spawn(function()
+    local friendsHere = {}
+    local firstScan = true
+    local wasLoaded = false
+    while true do
+        local ok, err = pcall(function()
+            refreshFriends()
+            -- the moment the friends list first loads, friends already in the server
+            -- become the baseline instead of counting as "just joined"
+            if friendsLoaded and not wasLoaded then
+                wasLoaded = true
+                firstScan = true
+            end
+            local present = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= plr and isFriend(p) then
+                    present[p.UserId] = true
+                    local isNew = not friendsHere[p.UserId]
+                    local counts = (not firstScan) or CHECK_EXISTING_FRIENDS
+                    if isNew and counts and cfg.friendStop and cfg.enabled then
+                        friendStopTrigger(p.Name)
+                    end
+                end
+            end
+            friendsHere = present
+            firstScan = false
+        end)
+        if not ok then warn("[CoinFarm friend] " .. tostring(err)) end
+        wait(1)
+    end
+end)
+ 
 notify("Coin farm loaded. F1 hides/shows the menu.", "Coin Farm", 4)
