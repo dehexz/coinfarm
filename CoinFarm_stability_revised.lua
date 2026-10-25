@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local plr = Players.LocalPlayer
  
-local OFFSET = 5          -- studs below the coin to travel at
+local OFFSET = 1          -- studs below the coin to travel at
 local FIRST_SPEED = 999   -- first coin of the round is a fast snap
 local MENU_KEY = 0x70     -- F1
 local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
