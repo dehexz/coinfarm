@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local plr = Players.LocalPlayer
  
-local OFFSET = 1          -- studs below the coin to travel at
+local OFFSET = 0          -- studs below the coin to travel at
 local FIRST_SPEED = 999   -- first coin of the round is a fast snap
 local MENU_KEY = 0x70     -- F1
 local HEALTH_OFFSET = 0x184 -- Humanoid health offset for memory_write (changes when Roblox updates)
@@ -23,6 +23,7 @@ local first = true
 local missed = 0         -- consecutive coins we reached but couldn't collect
 local lastResetTry = 0
 local noCoinSince = nil
+local noCoinResetDone = false -- send Esc, R, Enter once after the coin container stays empty
 local status = "Starting"
 local lifeChar = nil     -- character we last farmed with
 local lastContainerSeen = nil -- coin container from the previous step (map change detector)
@@ -390,6 +391,7 @@ local function step()
         lastContainerSeen = container
         missed = 0
         first, noCoinSince = true, nil
+        noCoinResetDone = false
         if container then
             freezeUntil = tick() + 2
             evt("new map, settling")
@@ -421,9 +423,27 @@ local function step()
         noCoinSince = noCoinSince or tick()
         cachedContainer = nil -- may be stale (new round/new map), re-scan
         status = "No coins"
+
+        -- If the map has stayed empty for 2 seconds, request a Roblox reset
+        -- with Esc -> R -> Enter. Only send keys while Roblox is focused.
+        if not noCoinResetDone and tick() - noCoinSince >= 2 then
+            noCoinResetDone = true
+            if isrbxactive() then
+                pcall(function()
+                    keypress(0x1B) wait(0.1) keyrelease(0x1B) wait(0.3)
+                    keypress(0x52) wait(0.1) keyrelease(0x52) wait(0.3)
+                    keypress(0x0D) wait(0.1) keyrelease(0x0D)
+                end)
+                status = "Round ended - reset requested"
+                evt("round ended: Esc R Enter")
+            else
+                evt("round ended: Roblox not focused; reset skipped")
+            end
+        end
         return wait(0.1)
     end
     noCoinSince = nil
+    noCoinResetDone = false
  
     status = "Farming"
     setNoclip()
