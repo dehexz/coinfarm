@@ -241,33 +241,45 @@ local function resetCharacter()
         end
     end
  
-    -- 3) Roblox menu reset: Esc, R, Enter. Only when Roblox is the focused window,
-    --    otherwise these keys would be typed into whatever app you are looking at.
-    if isrbxactive() then
-        pcall(function()
-            keypress(0x1B) wait(0.1) keyrelease(0x1B) wait(0.3)
-            keypress(0x52) wait(0.1) keyrelease(0x52) wait(0.3)
-            keypress(0x0D) wait(0.1) keyrelease(0x0D)
-        end)
-        for _ = 1, 20 do
-            wait(0.1)
-            if not isAlive() then return true end
+    -- Roblox menu key reset removed: unsupported in Lua Virtual Machine.
+    return false
+end
+ 
+local PLAYER_COIN_BUFFER = 25 -- studs: avoid coins too close to another player
+
+local function isCoinNearOtherPlayer(coinPos)
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= plr then
+            local character = other.Character
+            local otherRoot = character and character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            if otherRoot and (not humanoid or humanoid.Health > 0) then
+                if dist(coinPos, otherRoot.Position) < PLAYER_COIN_BUFFER then
+                    return true
+                end
+            end
         end
     end
     return false
 end
- 
+
 local function getClosestCoin(container, origin)
     local best, bestDist = nil, math.huge
+    local anyAvailableCoin = false
     for _, obj in ipairs(container:GetChildren()) do
         if obj.Name == "Coin_Server" and obj:FindFirstChild("TouchInterest") then
-            local d = dist(obj.Position, origin)
-            if d < bestDist then
-                best, bestDist = obj, d
+            anyAvailableCoin = true
+            local coinPos = obj.Position
+            if not isCoinNearOtherPlayer(coinPos) then
+                local d = dist(coinPos, origin)
+                if d < bestDist then
+                    best, bestDist = obj, d
+                end
             end
         end
     end
-    return best
+    -- Second return value distinguishes an empty map from coins we are avoiding.
+    return best, (anyAvailableCoin and best == nil)
 end
  
 -- Moves hrp toward coin. Returns true only if we arrived while the coin was still up for grabs.
@@ -418,28 +430,18 @@ local function step()
         return wait(0.25)
     end
  
-    local coin = getClosestCoin(container, hrp.Position)
+    local coin, coinsAvoidedNearPlayers = getClosestCoin(container, hrp.Position)
     if not coin then
+        if coinsAvoidedNearPlayers then
+            noCoinSince = nil
+            status = "Waiting: coins near players"
+            return wait(0.25)
+        end
         noCoinSince = noCoinSince or tick()
         cachedContainer = nil -- may be stale (new round/new map), re-scan
         status = "No coins"
 
-        -- If the map has stayed empty for 2 seconds, request a Roblox reset
-        -- with Esc -> R -> Enter. Only send keys while Roblox is focused.
-        if not noCoinResetDone and tick() - noCoinSince >= 2 then
-            noCoinResetDone = true
-            if isrbxactive() then
-                pcall(function()
-                    keypress(0x1B) wait(0.1) keyrelease(0x1B) wait(0.3)
-                    keypress(0x52) wait(0.1) keyrelease(0x52) wait(0.3)
-                    keypress(0x0D) wait(0.1) keyrelease(0x0D)
-                end)
-                status = "Round ended - reset requested"
-                evt("round ended: Esc R Enter")
-            else
-                evt("round ended: Roblox not focused; reset skipped")
-            end
-        end
+        -- No keyboard reset here; Lua Virtual Machine did not handle Esc/R/Enter reliably.
         return wait(0.1)
     end
     noCoinSince = nil
